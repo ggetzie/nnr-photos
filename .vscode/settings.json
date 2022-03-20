@@ -1,9 +1,3 @@
 {
-  "cSpell.ignoreWords": [
-    "WEBP",
-    "avif",
-    "bimg",
-    "heif",
-    "magick"
-  ]
+  "cSpell.ignoreWords": ["WEBP", "avif", "bimg", "heif", "libvips", "magick"]
 }
