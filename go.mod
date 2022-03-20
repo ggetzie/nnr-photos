@@ -1,12 +1,7 @@
-module github.com/ggetzie/nnr/awslambda/photos
+module github.com/ggetzie/nnr-photos
 
 go 1.17
 
-require github.com/h2non/bimg v1.1.5
+require github.com/h2non/bimg v1.1.7
 
-require github.com/aws/aws-lambda-go v1.27.0
-
-require (
-	github.com/aws/aws-sdk-go v1.43.21 // indirect
-	github.com/jmespath/go-jmespath v0.4.0 // indirect
-)
+require github.com/aws/aws-lambda-go v1.28.0

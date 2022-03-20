@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path"
@@ -192,5 +194,22 @@ func testHandler(ctx context.Context, event events.S3Event) (string, error) {
 }
 
 func main() {
-	lambda.Start(testHandler)
+	runLocal := flag.Bool("local", false, "Run locally")
+	input := flag.String("input", "", "Absolute path to input file")
+	outputDir := flag.String("output", "", "Absolute path to output directory")
+	flag.Parse()
+	if *runLocal {
+		img, err := loadImageLocal(*input)
+		if err != nil {
+			log.Fatalf("Error loading file: %s", *input)
+		}
+		msg, err := processImage(img, getDefaultImageTypes(), getDefaultDims(), *outputDir)
+		fmt.Println(msg)
+		if err != nil {
+			log.Fatalf("Error processing image: %v", err)
+		}
+	} else {
+		lambda.Start(testHandler)
+	}
+
 }
