@@ -102,6 +102,7 @@ ADD photos.go ./
 RUN go build -ldflags "-r /usr/local/lib" -o /main photos.go
 
 # copy artifacts to a clean image
-FROM public.ecr.aws/lambda/provided:al2
-COPY --from=build /main /main
+# FROM public.ecr.aws/lambda/provided:al2
+# COPY --from=build /main /main
+# COPY --from=build /usr/local/lib /usr/local/lib
 ENTRYPOINT [ "/main" ]           
