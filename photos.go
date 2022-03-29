@@ -133,15 +133,20 @@ func processImage(
 			newImage, err := bimg.NewImage(origImage).Resize(newDims.Width, newDims.Height)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)
-				return fmt.Sprintf("Error resizing to %dWx%dH", newDims.Width, newDims.Height), err
+				return fmt.Sprintf("Error resizing to %dWx%dH\n", newDims.Width, newDims.Height), err
 			}
 			newImage, err = bimg.NewImage(newImage).Convert(iType)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)
-				return fmt.Sprintf("Error converting to %s", bimg.ImageTypeName(iType)), err
+				return fmt.Sprintf("Error converting to %s\n", bimg.ImageTypeName(iType)), err
 			}
 			saveImageLocal(newImage, savePath)
 		}
+	}
+	thumbnail, err := bimg.NewImage(origImage).Thumbnail(128)
+	saveImageLocal(thumbnail, path.Join(save_to, "thumbnail.jpeg"))
+	if err != nil {
+		return fmt.Sprintf("Error creating thumbnail: %v", err.Error()), err
 	}
 	return "Success", nil
 }
