@@ -174,6 +174,7 @@ func downloadImage(bucket string, key string, client *s3.Client, ctx context.Con
 	if !bimg.IsTypeNameSupported(img.Type()) {
 		return nil, errors.New("invalid image type")
 	}
+	fmt.Println(fmt.Sprintf("Downloaded %s", key))
 	return img, nil
 }
 
@@ -197,36 +198,40 @@ func Handler(ctx context.Context, event events.S3Event) (string, error) {
 	// e.g. if file came from <source_bucket>/media/images/tags/bread/orig.jpg
 	//      upload output files to <destination_bucket>/media/images/tags/bread/1200.webp ... etc.
 	destination_bucket := os.Getenv("DESTINATION_BUCKET")
-	prefix, _, err := splitKey(source_object)
+	prefix, filename, err := splitKey(source_object)
 	if err != nil {
 		log.Fatalf("Error splitting object key: %v", err.Error())
 	}
-	fmt.Printf("Got prefix: %s\n", prefix)
+	fmt.Printf("Got prefix: %s and Filename: %s\n", prefix, filename)
 	output_dir := "/tmp/output"
 
 	// configure aws
 	cfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
-		log.Fatalf("Configuration Error: %v", err.Error())
+		fmt.Printf("Configuration Error: %v", err.Error())
+		return "Error", err
 	}
 	client := s3.NewFromConfig(cfg)
 	// download original image
 	original, err := downloadImage(source_bucket, source_object, client, ctx)
 	if err != nil {
-		log.Fatalf("Error downloading image from s3: %v", err.Error())
+		fmt.Printf("Error downloading image from s3: %v\n", err.Error())
+		return "Error", err
 	}
 
 	os.MkdirAll(output_dir, 0700)
 	processImage(original, getDefaultImageTypes(), getDefaultDims(), output_dir)
 	files, err := os.ReadDir(output_dir)
 	if err != nil {
-		log.Fatalf("Error reading %s: %v", output_dir, err.Error())
+		fmt.Printf("Error reading %s: %v\n", output_dir, err.Error())
+		return "Error", err
 	}
 	for _, f := range files {
 		full_path := filepath.Join(output_dir, f.Name())
 		file, err := os.Open(full_path)
 		if err != nil {
-			log.Fatalf("Error opening output file %s: %v", full_path, err.Error())
+			fmt.Printf("Error opening output file %s: %v\n", full_path, err.Error())
+			return "Error", err
 		}
 		input := &s3.PutObjectInput{
 			Bucket: &destination_bucket,
@@ -235,7 +240,8 @@ func Handler(ctx context.Context, event events.S3Event) (string, error) {
 		}
 		_, err = client.PutObject(ctx, input)
 		if err != nil {
-			log.Fatalf("Error uploading %s: %v", full_path, err.Error())
+			fmt.Printf("Error uploading %s: %v\n", full_path, err.Error())
+			return "Error", err
 		}
 	}
 
