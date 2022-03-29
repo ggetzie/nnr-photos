@@ -7,13 +7,17 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net/http"
 	"os"
 	"path"
+	"path/filepath"
+	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-lambda-go/lambdacontext"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/h2non/bimg"
 )
 
@@ -142,54 +146,108 @@ func processImage(
 	return "Success", nil
 }
 
-func downloadImage(url string) (string, error) {
-	response, err := http.Get(url)
+func downloadImage(bucket string, key string, client *s3.Client, ctx context.Context) (*bimg.Image, error) {
+	// Download image from s3 bucket and return it to be processed
+
+	params := &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	}
+	response, err := client.GetObject(ctx, params)
 	if err != nil {
-		return "", err
+		fmt.Fprintln(os.Stderr, err)
+		return nil, err
 	}
+
 	defer response.Body.Close()
-	if response.StatusCode != 200 {
-		return "", errors.New("error downloading image")
-	}
+
 	buffer, err := io.ReadAll(response.Body)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	img := bimg.NewImage(buffer)
 	if !bimg.IsTypeNameSupported(img.Type()) {
-		return "", errors.New("invalid image type")
+		return nil, errors.New("invalid image type")
 	}
-	filepath := fmt.Sprintf("/tmp/downloaded.%s", img.Type())
-	bimg.Write(filepath, img.Image())
-	return filepath, nil
+	return img, nil
+}
+
+func splitKey(s3ObjectKey string) (string, string, error) {
+	lastSlash := strings.LastIndex(s3ObjectKey, "/")
+	if lastSlash == len(s3ObjectKey)-1 {
+		return "", "", errors.New("No filename found in S3 Object Key!")
+	}
+	prefix := s3ObjectKey[0:lastSlash]
+	filename := s3ObjectKey[lastSlash+1:]
+	return prefix, filename, nil
 }
 
 func Handler(ctx context.Context, event events.S3Event) (string, error) {
 
-	// get bucket item from event
+	// get bucket and item from event,
+	source_bucket := event.Records[0].S3.Bucket.Name
+	source_object := event.Records[0].S3.Object.Key
 
-	// download photo to /tmp
-	filepath, err := downloadImage("https://image")
+	// get upload destination. Keep same prefix.
+	// e.g. if file came from <source_bucket>/media/images/tags/bread/orig.jpg
+	//      upload output files to <destination_bucket>/media/images/tags/bread/1200.webp ... etc.
+	destination_bucket := os.Getenv("DESTINATION_BUCKET")
+	prefix, _, err := splitKey(source_object)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return "Error downloading image", err
+		log.Fatalf("Error splitting object key: %v", err.Error())
 	}
-	// load original image
-	original, err := loadImageLocal(filepath)
+	fmt.Printf("Got prefix: %s\n", prefix)
+	output_dir := "/tmp/output"
+
+	// configure aws
+	cfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return "Error opening image file", err
+		log.Fatalf("Configuration Error: %v", err.Error())
+	}
+	client := s3.NewFromConfig(cfg)
+	// download original image
+	original, err := downloadImage(source_bucket, source_object, client, ctx)
+	if err != nil {
+		log.Fatalf("Error downloading image from s3: %v", err.Error())
 	}
 
-	processImage(original, getDefaultImageTypes(), getDefaultDims(), "/tmp/output")
+	os.MkdirAll(output_dir, 0700)
+	processImage(original, getDefaultImageTypes(), getDefaultDims(), output_dir)
+	files, err := os.ReadDir(output_dir)
+	if err != nil {
+		log.Fatalf("Error reading %s: %v", output_dir, err.Error())
+	}
+	for _, f := range files {
+		full_path := filepath.Join(output_dir, f.Name())
+		file, err := os.Open(full_path)
+		if err != nil {
+			log.Fatalf("Error opening output file %s: %v", full_path, err.Error())
+		}
+		input := &s3.PutObjectInput{
+			Bucket: &destination_bucket,
+			Key:    aws.String(fmt.Sprintf("%s/%s", prefix, f.Name())),
+			Body:   file,
+		}
+		_, err = client.PutObject(ctx, input)
+		if err != nil {
+			log.Fatalf("Error uploading %s: %v", full_path, err.Error())
+		}
+	}
+
 	return "Success", nil
 }
 
 func testHandler(ctx context.Context, event events.S3Event) (string, error) {
 	lc, _ := lambdacontext.FromContext(ctx)
 	fmt.Println(fmt.Sprintf("Lambda Context %v", lc))
+	key := event.Records[0].S3.Object.Key
+	prefix, filename, err := splitKey(key)
+	if err != nil {
+		log.Fatalf("Error splitting object key: %v", err.Error())
+	}
 	fmt.Println(fmt.Sprintf("Bucket: %s", event.Records[0].S3.Bucket.Name))
-	fmt.Println(fmt.Sprintf("Object: %s", event.Records[0].S3.Object.Key))
+	fmt.Println(fmt.Sprintf("Object: %s", key))
+	fmt.Println(fmt.Sprintf("Prefix: %s, Filename: %s", prefix, filename))
 	return "success", nil
 }
 
@@ -209,7 +267,7 @@ func main() {
 			log.Fatalf("Error processing image: %v", err)
 		}
 	} else {
-		lambda.Start(testHandler)
+		lambda.Start(Handler)
 	}
 
 }
