@@ -46,6 +46,15 @@ func TestProcessImage(t *testing.T) {
 	}
 }
 
+func TestGetEnv(t *testing.T) {
+	notHere := os.Getenv("THIS_VARIABLE_NO_EXIST")
+	if notHere == "" {
+		t.Logf("It's an empty string")
+	}
+	path := os.Getenv("PATH")
+	t.Logf("Path= %s", path)
+}
+
 func TestInvalid(t *testing.T) {
 	filepath := "/media/gabe/data/pictures/websites/nnr/test/project.css"
 	img, err := loadImageLocal(filepath)

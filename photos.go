@@ -67,6 +67,11 @@ func getImageType(ext string) (bimg.ImageType, error) {
 func parseImageTypes(formats string) ([]bimg.ImageType, error) {
 	// take a string of image type extensions and return the bimg.ImageType values
 	// e.g. "jpg,png,webp" -> [bimg.JPEG, bimg.PNG, bimg.WEBP]
+	if formats == "" {
+		// os.Getenv will return an empty string if the variable is not defined
+		// use default values in this case.
+		return getDefaultImageTypes(), nil
+	}
 	imageTypeStrings := strings.Split(formats, ",")
 	var res []bimg.ImageType
 
@@ -99,6 +104,11 @@ func parseDims(dimStr string) (map[string]bimg.ImageSize, error) {
 	// name1: {Width: Width1, Height: Height1}
 	// name2: {Width: Width2, Height: Height2}
 	// ...
+	if dimStr == "" {
+		// os.Getenv will return an empty string if the variable is not defined
+		// use default values in this case.
+		return getDefaultDims(), nil
+	}
 	dimStrs := strings.Split(dimStr, ";") // ["name1:width1,height1", "name2:width2,height2"]
 	dims := make(map[string]bimg.ImageSize)
 
@@ -285,10 +295,26 @@ func Handler(ctx context.Context, event events.S3Event) (string, error) {
 	fmt.Printf("Got prefix: %s and Filename: %s\n", prefix, filename)
 	output_dir := "/tmp/output"
 
+	// get dimensions
+	dimStr := os.Getenv("DIMENSIONS")
+	dims, err := parseDims(dimStr)
+	if err != nil {
+		fmt.Printf("Error in Dimensions:  %v\n", err.Error())
+		return "Error", err
+	}
+
+	// get output formats
+	formatStr := os.Getenv("FORMATS")
+	formats, err := parseImageTypes(formatStr)
+
+	if err != nil {
+		fmt.Printf("Error in output formats: %v\n", err.Error())
+	}
+
 	// configure aws
 	cfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
-		fmt.Printf("Configuration Error: %v", err.Error())
+		fmt.Printf("Configuration Error: %v\n", err.Error())
 		return "Error", err
 	}
 	client := s3.NewFromConfig(cfg)
@@ -304,7 +330,8 @@ func Handler(ctx context.Context, event events.S3Event) (string, error) {
 		fmt.Printf("Error creating output directories: %v\n", err.Error())
 		return "Error", err
 	}
-	processImage(original, getDefaultImageTypes(), getDefaultDims(), output_dir, 128)
+
+	processImage(original, formats, dims, output_dir, 128)
 	files, err := os.ReadDir(output_dir)
 	if err != nil {
 		fmt.Printf("Error reading %s: %v\n", output_dir, err.Error())
@@ -336,9 +363,9 @@ func main() {
 	runLocal := flag.Bool("local", false, "Run locally")
 	input := flag.String("input", "", "Absolute path to input file")
 	outputDir := flag.String("output", "", "Absolute path to output directory")
-	formats := flag.String("formats", "", "Comma separated list of output formats: e.g. jpeg,webp,png")
+	formats := flag.String("formats", "", "Comma separated list of output formats: e.g. \"jpeg,webp,png\" - default \"jpeg,webp\"")
 	dimStr := flag.String("dims", "", "List of output dimensions formatted as name1:width1,height1;name2:width2,height2")
-	thumbSize := flag.Int("thumbSize", 128, "Size of thumbnail")
+	thumbSize := flag.Int("thumbSize", 128, "Size of thumbnail - default 128px")
 	flag.Parse()
 	if *runLocal {
 		img, err := loadImageLocal(*input)
