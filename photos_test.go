@@ -32,7 +32,7 @@ func TestProcessImage(t *testing.T) {
 	}
 	iTypes := getDefaultImageTypes()
 	dims := getDefaultDims()
-	processImage(img, iTypes, dims, folder)
+	processImage(img, iTypes, dims, folder, 128)
 	for screenSize := range dims {
 		for _, iType := range iTypes {
 			filename := fmt.Sprintf("%s.%s", screenSize, bimg.ImageTypeName(iType))

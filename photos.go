@@ -10,11 +10,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
-	"github.com/aws/aws-lambda-go/lambdacontext"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -37,6 +37,49 @@ func getDefaultImageTypes() []bimg.ImageType {
 	return []bimg.ImageType{bimg.JPEG, bimg.WEBP}
 }
 
+func getImageType(ext string) (bimg.ImageType, error) {
+	switch ext {
+	case "jpeg", "jpg":
+		return bimg.JPEG, nil
+	case "png":
+		return bimg.PNG, nil
+	case "webp":
+		return bimg.WEBP, nil
+	case "tiff":
+		return bimg.TIFF, nil
+	case "gif":
+		return bimg.GIF, nil
+	case "pdf":
+		return bimg.PDF, nil
+	case "svg":
+		return bimg.SVG, nil
+	case "magick":
+		return bimg.MAGICK, nil
+	case "heif":
+		return bimg.HEIF, nil
+	case "avif":
+		return bimg.AVIF, nil
+	}
+
+	return bimg.UNKNOWN, errors.New(fmt.Sprintf("Unknown image type: %s", ext))
+}
+
+func parseImageTypes(formats string) ([]bimg.ImageType, error) {
+	// take a string of image type extensions and return the bimg.ImageType values
+	// e.g. "jpg,png,webp" -> [bimg.JPEG, bimg.PNG, bimg.WEBP]
+	imageTypeStrings := strings.Split(formats, ",")
+	var res []bimg.ImageType
+
+	for _, ext := range imageTypeStrings {
+		t, err := getImageType(strings.ToLower(ext))
+		if err != nil {
+			return res, err
+		}
+		res = append(res, t)
+	}
+	return res, nil
+}
+
 func getDefaultDims() map[string]bimg.ImageSize {
 	// Array of {width, height} to resize photos to
 	dims := map[string]bimg.ImageSize{
@@ -48,6 +91,39 @@ func getDefaultDims() map[string]bimg.ImageSize {
 		"320":  {Width: 310, Height: 225},
 	}
 	return dims
+}
+
+func parseDims(dimStr string) (map[string]bimg.ImageSize, error) {
+	// Take string in the format name1:Width1,Height1;name2:Width2,Height2...
+	// and convert to map of
+	// name1: {Width: Width1, Height: Height1}
+	// name2: {Width: Width2, Height: Height2}
+	// ...
+	dimStrs := strings.Split(dimStr, ";") // ["name1:width1,height1", "name2:width2,height2"]
+	dims := make(map[string]bimg.ImageSize)
+
+	for _, ds := range dimStrs {
+		nameWHs := strings.Split(ds, ":") // ["name", "width,height"]
+		if len(nameWHs) != 2 {
+			return dims, errors.New("Invalid dimensions format: " + ds)
+		}
+		name := nameWHs[0]
+		wh := strings.Split(nameWHs[1], ",") // ["width", "height"]
+		if len(wh) != 2 {
+			return dims, errors.New("Invalid dimensions format: " + ds)
+		}
+		width, err := strconv.Atoi(wh[0])
+		if err != nil {
+			return dims, errors.New(fmt.Sprintf("Invalid width value %s in dim string: %s", wh[0], ds))
+		}
+		height, err := strconv.Atoi(wh[1])
+		if err != nil {
+			return dims, errors.New(fmt.Sprintf("Invalid height value %s in dim string %s", wh[1], ds))
+		}
+		dims[name] = bimg.ImageSize{Width: width, Height: height}
+	}
+
+	return dims, nil
 }
 
 func printMetadata(filepath string) {
@@ -108,7 +184,8 @@ func processImage(
 	img *bimg.Image,
 	imageTypes []bimg.ImageType,
 	dims map[string]bimg.ImageSize,
-	save_to string) (string, error) {
+	save_to string,
+	thumbSize int) (string, error) {
 	origOptions := bimg.Options{
 		NoAutoRotate:  false,
 		StripMetadata: true,
@@ -143,7 +220,7 @@ func processImage(
 			saveImageLocal(newImage, savePath)
 		}
 	}
-	thumbnail, err := bimg.NewImage(origImage).Thumbnail(128)
+	thumbnail, err := bimg.NewImage(origImage).Thumbnail(thumbSize)
 	saveImageLocal(thumbnail, path.Join(save_to, "thumbnail.jpeg"))
 	if err != nil {
 		return fmt.Sprintf("Error creating thumbnail: %v", err.Error()), err
@@ -179,6 +256,8 @@ func downloadImage(bucket string, key string, client *s3.Client, ctx context.Con
 }
 
 func splitKey(s3ObjectKey string) (string, string, error) {
+	// separate filename from path in s3ObjectKey
+	// e.g. media/images/raw/bread.jpeg -> "media/images/raw", "bread.jpeg"
 	lastSlash := strings.LastIndex(s3ObjectKey, "/")
 	if lastSlash == len(s3ObjectKey)-1 {
 		return "", "", errors.New("No filename found in S3 Object Key!")
@@ -200,7 +279,8 @@ func Handler(ctx context.Context, event events.S3Event) (string, error) {
 	destination_bucket := os.Getenv("DESTINATION_BUCKET")
 	prefix, filename, err := splitKey(source_object)
 	if err != nil {
-		log.Fatalf("Error splitting object key: %v", err.Error())
+		fmt.Printf("Error splitting object key: %v", err.Error())
+		return "Error", err
 	}
 	fmt.Printf("Got prefix: %s and Filename: %s\n", prefix, filename)
 	output_dir := "/tmp/output"
@@ -219,8 +299,12 @@ func Handler(ctx context.Context, event events.S3Event) (string, error) {
 		return "Error", err
 	}
 
-	os.MkdirAll(output_dir, 0700)
-	processImage(original, getDefaultImageTypes(), getDefaultDims(), output_dir)
+	err = os.MkdirAll(output_dir, 0700)
+	if err != nil {
+		fmt.Printf("Error creating output directories: %v\n", err.Error())
+		return "Error", err
+	}
+	processImage(original, getDefaultImageTypes(), getDefaultDims(), output_dir, 128)
 	files, err := os.ReadDir(output_dir)
 	if err != nil {
 		fmt.Printf("Error reading %s: %v\n", output_dir, err.Error())
@@ -248,31 +332,38 @@ func Handler(ctx context.Context, event events.S3Event) (string, error) {
 	return "Success", nil
 }
 
-func testHandler(ctx context.Context, event events.S3Event) (string, error) {
-	lc, _ := lambdacontext.FromContext(ctx)
-	fmt.Println(fmt.Sprintf("Lambda Context %v", lc))
-	key := event.Records[0].S3.Object.Key
-	prefix, filename, err := splitKey(key)
-	if err != nil {
-		log.Fatalf("Error splitting object key: %v", err.Error())
-	}
-	fmt.Println(fmt.Sprintf("Bucket: %s", event.Records[0].S3.Bucket.Name))
-	fmt.Println(fmt.Sprintf("Object: %s", key))
-	fmt.Println(fmt.Sprintf("Prefix: %s, Filename: %s", prefix, filename))
-	return "success", nil
-}
-
 func main() {
 	runLocal := flag.Bool("local", false, "Run locally")
 	input := flag.String("input", "", "Absolute path to input file")
 	outputDir := flag.String("output", "", "Absolute path to output directory")
+	formats := flag.String("formats", "", "Comma separated list of output formats: e.g. jpeg,webp,png")
+	dimStr := flag.String("dims", "", "List of output dimensions formatted as name1:width1,height1;name2:width2,height2")
+	thumbSize := flag.Int("thumbSize", 128, "Size of thumbnail")
 	flag.Parse()
 	if *runLocal {
 		img, err := loadImageLocal(*input)
 		if err != nil {
 			log.Fatalf("Error loading file: %s", *input)
 		}
-		msg, err := processImage(img, getDefaultImageTypes(), getDefaultDims(), *outputDir)
+		var dims map[string]bimg.ImageSize
+
+		if *dimStr == "" {
+			dims = getDefaultDims()
+		} else {
+			dims, err = parseDims(*dimStr)
+			if err != nil {
+				log.Fatalf("Error reading dim string: %v", err.Error())
+			}
+		}
+		iTypes, err := parseImageTypes(*formats)
+		if err != nil {
+			log.Fatalf("Error reading image formats: %v", err.Error())
+		}
+		err = os.MkdirAll(*outputDir, 0755)
+		if err != nil {
+			log.Fatalf("Error creating output directory: %s: %v", *outputDir, err.Error())
+		}
+		msg, err := processImage(img, iTypes, dims, *outputDir, *thumbSize)
 		fmt.Println(msg)
 		if err != nil {
 			log.Fatalf("Error processing image: %v", err)
