@@ -4,7 +4,7 @@ This program was created to automatically optimize photos uploaded to [No Nonsen
 
 It's written in [Go](https://go.dev/) and uses the [bimg](https://pkg.go.dev/github.com/h2non/bimg) package.
 
-bimg depends on [libvips](https://www.libvips.org/), so a Docker image modifying the [AWS Lambda base image](https://github.com/aws/aws-lambda-base-images/blob/go1.x/Dockerfile.go1.x) to install libvips is included and all other necessary libraries to support JPEG, WEBP, PNG, GIF, HEIF, and TIFF formats.
+bimg depends on [libvips](https://www.libvips.org/), so a Docker image modifying the [AWS Lambda base image](https://github.com/aws/aws-lambda-base-images/blob/go1.x/Dockerfile.go1.x) to install libvips is included with all necessary libraries to support JPEG, WEBP, PNG, GIF, HEIF, and TIFF formats.
 
 `nnr-photos` performs a number of common operations to optimize images for the web:
 
@@ -13,21 +13,23 @@ bimg depends on [libvips](https://www.libvips.org/), so a Docker image modifying
 - Convert to jpeg - converts all input files to JPEG with the original dimensions
 - Create thumbnails
 - Resize to common screen-friendly dimensions and convert to common formats. By default, `nnr-photos` will output jpeg and webp formats in the following dimensions:    
-  |Name  |Width|Height|Screen width|
-  |---   |---  |---   |---         |
-  |"1200"|1090 | 818  | >= 1200px  |
-	|"992" |910  |683   | >= 992px   |
-	|"768" |670  | 503  | >= 768px   |
-	|"576" | 515 | 386  | >= 576px   |
-	|"408" | 400 | 300  | >= 408px   |
-	|"320" | 310 | 225  | >= 320px   |
 
+### Default Output Dimensions
+|Name  |Width|Height|Screen width|
+|---   |---  |---   |---         |
+|"1200"|1090 |818   | >= 1200px  |
+|"992" |910  |683   | >= 992px   |
+|"768" |670  |503   | >= 768px   |
+|"576" |515  |386   | >= 576px   |
+|"408" |400  |300   | >= 408px   |
+|"320" |310  |225   | >= 320px   |
 
+  
 ### Example Output
 
 ```
-input                ->               images_processed/
-└── somePic.png                       └── somePic
+images_raw/          ->               images_processed/
+└── bread.png                         └── bread
                                           ├── 1200.jpeg
                                           ├── 1200.webp
                                           ├── 320.jpeg
@@ -44,6 +46,40 @@ input                ->               images_processed/
                                           └── thumbnail.jpeg
 
 ```
+
+The output files can then be used with `<picture>` tag to display the best size photo for each user depending on their screen size.
+
+```html
+<picture>
+  <source media="(min-width:1200px)" 
+          srcset="/media/images/tags/bread/1200.webp">
+  <source media="(min-width:1200px)" 
+          srcset="/media/images/tags/bread/1200.jpeg">
+  <source media="(min-width:992px)" 
+          srcset="/media/images/tags/bread/992.webp">
+  <source media="(min-width:992px)" 
+          srcset="/media/images/tags/bread/992.jpeg">
+  <source media="(min-width:768px)" 
+          srcset="/media/images/tags/bread/768.webp">
+  <source media="(min-width:768px)" 
+          srcset="/media/images/tags/bread/768.jpeg">
+  <source media="(min-width:576px)" 
+          srcset="/media/images/tags/bread/576.webp">
+  <source media="(min-width:576px)" 
+          srcset="/media/images/tags/bread/576.jpeg">
+  <source media="(min-width:408px)" 
+          srcset="/media/images/tags/bread/408.webp">
+  <source media="(min-width:408px)" 
+          srcset="/media/images/tags/bread/408.jpeg">
+  <source media="(min-width:320px)" 
+          srcset="/media/images/tags/bread/320.webp">
+  <source media="(min-width:320px)" 
+          srcset="/media/images/tags/bread/320.jpeg">
+  <img src="/media/images/tags/bread/orig.jpeg">
+</picture>
+```
+
+Output formats and dimensions can be customized by setting the `DIMENSIONS`, `FORMATS`, `THUMB_SIZE` environment variables when used in a Lambda function or the `--dims`, `--formats`, `--thumbSize` flags when used at the command line. 
 
 ## Lambda Usage
 
@@ -73,8 +109,8 @@ sudo ln -s /path/to/photos /usr/local/bin/photos
 Specify the input file, output directory, desired output file types, desired dimensions, and thumbnail size.
 
 ```bash
-photos --local --input=/home/gabe/images_raw/input.png \
---output=/home/gabe/images_processed/ \
+photos --local --input=/path/to/images_raw/input.png \
+--output=/path/to/images_processed/ \
 --dims="web-size:300,400;mobile-size:150,200" \
 --formats="jpeg,webp" \
 --thumbSize=64
@@ -86,19 +122,19 @@ It's also easy to process an entire directory of images at a time with a small s
 #!/usr/bin/env bash
 
 function convertImage () {
-  OUTPUT_DIR="/home/gabe/images_processed"
-  # get filename from absolute 
-  filename=`echo $1 | cut -d'/' -f8` path
+  OUTPUT_DIR="/path/to/images_processed"
 
-  # remove extension from filename to use as directory name
-  imgdir=`echo $filename | sed -E 's/\.[^.]+$//'` 
+  # get filename without extension to use as subdirectory name
+  imgdir=`echo $1 | awk -F / '{print $(NF)}' | awk -F . '{print $1}'`
 
   photos --local --input="$1" --output="${OUTPUT_DIR}/${imgdir}" \
-  --formats="jpeg,webp" --dims="opt:300,500;mob:150,400" --thumbSize=64
+  --formats="jpeg,webp" \
+  --dims="web-size:300,500;mobile-size:150,400" \
+  --thumbSize=64
 }
 
 export -f convertImage
 
-find /home/gabe/images_raw -type f -print0 | \
+find /path/to/images_raw -type f -print0 | \
 xargs -0 -P8 -I  {} bash -c 'convertImage "{}"' _ {}
 ```
