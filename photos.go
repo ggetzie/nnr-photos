@@ -311,6 +311,15 @@ func Handler(ctx context.Context, event events.S3Event) (string, error) {
 		fmt.Printf("Error in output formats: %v\n", err.Error())
 	}
 
+	// get thumbnail size
+	thumbSizeStr := os.Getenv("THUMB_SIZE")
+	thumbSize, err := strconv.Atoi(thumbSizeStr)
+	if err != nil {
+		thumbSize = 128
+		fmt.Printf("Invalid value for THUMB_SIZE: %s\n", thumbSizeStr)
+		fmt.Printf("Using default value: 128\n")
+	}
+
 	// configure aws
 	cfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
@@ -331,7 +340,7 @@ func Handler(ctx context.Context, event events.S3Event) (string, error) {
 		return "Error", err
 	}
 
-	processImage(original, formats, dims, output_dir, 128)
+	processImage(original, formats, dims, output_dir, thumbSize)
 	files, err := os.ReadDir(output_dir)
 	if err != nil {
 		fmt.Printf("Error reading %s: %v\n", output_dir, err.Error())
