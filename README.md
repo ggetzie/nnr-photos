@@ -81,6 +81,10 @@ The output files can then be used with `<picture>` tag to display the best size 
 
 Output formats and dimensions can be customized by setting the `DIMENSIONS`, `FORMATS`, `THUMB_SIZE` environment variables when used in a Lambda function or the `--dims`, `--formats`, `--thumbSize` flags when used at the command line. 
 
+- `DIMENSIONS` or `--dims` accepts a string in the format "name1:width1,height1;name2:width2,height2" e.g. "web-size:800,600;mobile-size:400,300"
+- `FORMATS` or `--formats` accepts a string of comma-separated image format extensions e.g. "jpeg,png,webp"
+- `THUMB_SIZE` of `--thumbSize` accepts a single integer which will be the height and width, in pixels of the thumbnail.
+
 ## Lambda Usage
 
 Replace `1234567890` below with the appropriate address for your AWS ECR repository.
@@ -93,6 +97,15 @@ Replace `1234567890` below with the appropriate address for your AWS ECR reposit
   `docker tag nnr-photos:latest 1234567890.dkr.ecr.us-east-1.amazonaws.com/nnr-photos:latest`
 - Push to the AWS repository  
   `docker push 1234567890.dkr.ecr.us-east-1.amazonaws.com/nnr-photos:latest`
+
+  To use create a Lambda function and deploy with a container image: [AWS Docs](https://docs.aws.amazon.com/lambda/latest/dg/go-image.html)
+
+  Set an environment variable `DESTINATION_BUCKET` to the name of the S3 bucket where you would like the processed images to be saved.
+
+  Create an S3 `ObjectCreated` event trigger for the function so it runs every time a new images is uploaded to the source bucket. Note AWS recommends using separate buckets to avoid an infinite loop of recursive lambda calls.
+
+  Optionally set environment variables for `DIMENSIONS`, `FORMATS`, and `THUMB_SIZE` to use custom values instead of the defaults.
+  
   
 
 ## Command Line Usage
@@ -116,7 +129,7 @@ photos --local --input=/path/to/images_raw/input.png \
 --thumbSize=64
 ```
 
-It's also easy to process an entire directory of images at a time with a small script.
+It's also easy to process an entire directory of images at a time with a small script. The script below will process all images in a directory called `images_raw` and place the output in subfolders in the directory `images_processed`.
 
 ```bash
 #!/usr/bin/env bash
