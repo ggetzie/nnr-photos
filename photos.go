@@ -267,7 +267,7 @@ func downloadImage(bucket string, key string, client *s3.Client, ctx context.Con
 
 func splitKey(s3ObjectKey string) (string, string, error) {
 	// separate filename from path in s3ObjectKey
-	// e.g. media/images/raw/bread.jpeg -> "media/images/raw", "bread.jpeg"
+	// e.g. media/images/tags/bread/orig.jpg -> "media/images/tags/bread", "orig.jpg"
 	lastSlash := strings.LastIndex(s3ObjectKey, "/")
 	if lastSlash == len(s3ObjectKey)-1 {
 		return "", "", errors.New("No filename found in S3 Object Key!")
