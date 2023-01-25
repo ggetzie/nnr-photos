@@ -61,7 +61,7 @@ func getImageType(ext string) (bimg.ImageType, error) {
 		return bimg.AVIF, nil
 	}
 
-	return bimg.UNKNOWN, errors.New(fmt.Sprintf("Unknown image type: %s", ext))
+	return bimg.UNKNOWN, fmt.Errorf("unknown image type: %s", ext)
 }
 
 func parseImageTypes(formats string) ([]bimg.ImageType, error) {
@@ -124,11 +124,11 @@ func parseDims(dimStr string) (map[string]bimg.ImageSize, error) {
 		}
 		width, err := strconv.Atoi(wh[0])
 		if err != nil {
-			return dims, errors.New(fmt.Sprintf("Invalid width value %s in dim string: %s", wh[0], ds))
+			return dims, fmt.Errorf("invalid width value %s in dim string: %s", wh[0], ds)
 		}
 		height, err := strconv.Atoi(wh[1])
 		if err != nil {
-			return dims, errors.New(fmt.Sprintf("Invalid height value %s in dim string %s", wh[1], ds))
+			return dims, fmt.Errorf("invalid height value %s in dim string %s", wh[1], ds)
 		}
 		dims[name] = bimg.ImageSize{Width: width, Height: height}
 	}
@@ -160,13 +160,13 @@ func resizeToHeight(originalDims bimg.ImageSize, height int) bimg.ImageSize {
 }
 
 func resizeToWidth(originalDims bimg.ImageSize, width int) bimg.ImageSize {
-	// adjust dimensions to match width, perserving aspect ratio
+	// adjust dimensions to match width, preserving aspect ratio
 	newHeight := originalDims.Height * width / originalDims.Width
 	return bimg.ImageSize{Width: width, Height: newHeight}
 }
 
 func smartDims(originalDims bimg.ImageSize, maxDims bimg.ImageSize) bimg.ImageSize {
-	// Calculate dims within max width and height, perserving aspect ratio
+	// Calculate dims within max width and height, preserving aspect ratio
 	if (originalDims.Width <= maxDims.Width) && (originalDims.Height <= maxDims.Height) {
 		// already small enough
 		return originalDims
@@ -261,7 +261,7 @@ func downloadImage(bucket string, key string, client *s3.Client, ctx context.Con
 	if !bimg.IsTypeNameSupported(img.Type()) {
 		return nil, errors.New("invalid image type")
 	}
-	fmt.Println(fmt.Sprintf("Downloaded %s", key))
+	fmt.Printf("Downloaded %s", key)
 	return img, nil
 }
 
@@ -270,7 +270,7 @@ func splitKey(s3ObjectKey string) (string, string, error) {
 	// e.g. media/images/tags/bread/orig.jpg -> "media/images/tags/bread", "orig.jpg"
 	lastSlash := strings.LastIndex(s3ObjectKey, "/")
 	if lastSlash == len(s3ObjectKey)-1 {
-		return "", "", errors.New("No filename found in S3 Object Key!")
+		return "", "", errors.New("no filename found in S3 Object Key")
 	}
 	prefix := s3ObjectKey[0:lastSlash]
 	filename := s3ObjectKey[lastSlash+1:]
