@@ -145,7 +145,7 @@ func printMetadata(filepath string) {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 	}
-	fmt.Printf("metadata\n%+v", metadata)
+	fmt.Printf("metadata\n%+v\n", metadata)
 }
 
 func buildPath(folder string, name string, iType bimg.ImageType) string {
@@ -261,7 +261,7 @@ func downloadImage(bucket string, key string, client *s3.Client, ctx context.Con
 	if !bimg.IsTypeNameSupported(img.Type()) {
 		return nil, errors.New("invalid image type")
 	}
-	fmt.Printf("Downloaded %s", key)
+	fmt.Printf("Downloaded %s\n", key)
 	return img, nil
 }
 
@@ -289,7 +289,7 @@ func Handler(ctx context.Context, event events.S3Event) (string, error) {
 	destination_bucket := os.Getenv("DESTINATION_BUCKET")
 	prefix, filename, err := splitKey(source_object)
 	if err != nil {
-		fmt.Printf("Error splitting object key: %v", err.Error())
+		fmt.Printf("Error splitting object key: %v\n", err.Error())
 		return "Error", err
 	}
 	fmt.Printf("Got prefix: %s and Filename: %s\n", prefix, filename)
