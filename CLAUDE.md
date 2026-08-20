@@ -9,7 +9,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **no flag** → `lambda.Start(Handler)`, an AWS Lambda triggered by an S3 `ObjectCreated` event
 - **`--local`** → CLI that reads one file from disk and writes the output set to a directory
 
-Image work is done by [bimg](https://pkg.go.dev/github.com/h2non/bimg), which is cgo bindings over **libvips**. Nothing here builds or runs without libvips installed.
+**There is no cgo and no native dependency.** Image work is stdlib `image/*` plus `golang.org/x/image` (TIFF decode, `draw` for resampling), `github.com/gen2brain/webp` (WebP encode/decode) and `github.com/gen2brain/heic` (HEIC decode). Both gen2brain packages are CGo-free. The program builds with `CGO_ENABLED=0` and ships as a ~5.5 MB zip on `provided.al2023`.
+
+This replaced a bimg/libvips implementation that needed a >1 GB container image. Do not reintroduce a native image library without a strong reason.
 
 ## Two separate Go modules
 
@@ -17,29 +19,24 @@ The repo contains two independent modules with **no `go.work` and no parent/chil
 
 | Path | Module | Purpose |
 |---|---|---|
-| `.` | `github.com/ggetzie/nnr-photos` | the optimizer (`photos.go`) |
+| `.` | `github.com/ggetzie/nnr-photos` | the optimizer |
 | `cleanup/` | `github.com/ggetzie/nnr-photos/cleanup` | separate Lambda; on `ObjectRemoved`, deletes the whole derived-image folder from the destination bucket |
 
-`go build ./...` from the repo root does **not** include `cleanup/`. Run go commands from inside whichever module you are changing. The two modules pin different versions of the AWS SDK and different `go` directives (1.17 vs 1.18) — that is intentional drift, not something to unify unless asked.
-
-`cleanup/` has no Dockerfile; only `photos.go` has a container build.
+`go build ./...` from the repo root does **not** include `cleanup/`. Run go commands from inside whichever module you are changing, or use the Makefile targets, which cover both.
 
 ## Commands
 
-Build/test the optimizer (from repo root):
-
 ```bash
-go build -o build/photos photos.go
-go vet ./...
-go test -v .                 # see caveat below
-go test -run TestBuildPath .  # single test
+make build        # local CLI -> build/photos  (Django dev server depends on this path)
+make test         # both modules
+make vet          # both modules
+make lambda       # stripped arm64 bootstrap + photos-lambda.zip
+make deploy NAME=nnr-photos
 ```
 
-Build/test the cleanup Lambda:
+Single test: `go test -tags nodynamic -run TestSmartDims .`
 
-```bash
-cd cleanup && go build . && go vet ./...
-```
+**Always pass `-tags nodynamic`.** Without it, `gen2brain/webp` and `gen2brain/heic` probe for a system libwebp/libheif via `purego`/`dlopen` at runtime. On Lambda that is a pointless syscall on every cold start and a source of nondeterminism. The Makefile sets it; ad-hoc `go test`/`go build` invocations must too.
 
 Local run:
 
@@ -48,47 +45,53 @@ Local run:
   --dims="web:800,600;mobile:400,300" --formats="jpeg,webp" --thumbSize=64
 ```
 
-Container build + ECR push (replace the account id):
+`s3_test.json` is a sample S3 `ObjectCreated` event (`aws lambda invoke --payload fileb://s3_test.json`).
 
-```bash
-docker build -t nnr-photos .
-docker tag nnr-photos:latest 1234567890.dkr.ecr.us-east-1.amazonaws.com/nnr-photos:latest
-docker push 1234567890.dkr.ecr.us-east-1.amazonaws.com/nnr-photos:latest
-```
+## File layout
 
-`s3_test.json` is a sample S3 `ObjectCreated` event for invoking the Lambda (e.g. `aws lambda invoke --payload fileb://s3_test.json`).
+| File | Contents |
+|---|---|
+| `main.go` | flag parsing, `--local` mode |
+| `handler.go` | `Handler`, `handleRecord`, S3 get/put, `splitKey`, `loadSettings` |
+| `process.go` | `processImage` - the shared core for both run modes |
+| `decode.go` | format registration, `decodeImage`, EXIF orientation |
+| `resize.go` | `resizeTo`, `flatten`, `coverCrop` |
+| `encode.go` | `encode` - the single seam for the encoder stack |
+| `dims.go` | `smartDims`, `parseDims`, `parseImageTypes`, `buildPath` |
+| `types.go` | `ImageSize`, `ImageFormat`, `Derivative`, `sortedDims` |
 
-### Test caveat
-
-`photos_test.go` is not hermetic. `TestPrintMetadata`, `TestProcessImage`, and `TestInvalid` hardcode absolute paths on the author's machine (`/media/gabe/data/...`, `/usr/local/src/nnr/nnr/media/images/tags/breakfast/`, the sibling Django project). They fail anywhere else, and `TestProcessImage` writes its output back into the source folder. Only `TestBuildPath` and `TestGetEnv` are portable. Fix a hardcoded path by pointing it at a `testdata/` fixture rather than at another machine-specific path.
-
-## libvips dependency
-
-- **Ubuntu/local dev**: `./ubuntu_req` (`libvips42`, `libvips-dev` from apt). Distro packages may be too old for some formats.
-- **Lambda image**: `Dockerfile` starts from `public.ecr.aws/lambda/provided:al2` and compiles libwebp, libde265, x265, libheif, and libvips 8.12.2 **from source**, because the Amazon Linux 2 repos are too old. It also downloads a Go toolchain (`ARG GO_VERSION`) for the same reason. Expect a long build. Format support (JPEG/WEBP/PNG/GIF/HEIF/TIFF) is determined entirely by which `-devel` packages and source builds are present when libvips is configured — adding a format means editing the Dockerfile, not the Go code.
-- The final `go build` uses `-ldflags "-r /usr/local/lib"` so the runtime finds the shared libs installed under `/usr/local`.
-
-**Gotcha:** the Dockerfile does `ADD photos.go ./` and builds `go build ... photos.go`, naming the single file. If you split the root module into multiple files, the container build silently misses them — update both the `ADD` and the `go build` line.
+The build is `go build .`, not a named file, so adding a file needs no build change.
 
 ## How processing works
 
-`processImage` (photos.go) is the shared core for both run modes:
+`processImage` (process.go) is the shared core:
 
-1. `img.Process` with `StripMetadata: true`, `NoAutoRotate: false`, `Type: bimg.JPEG` — this single step drops EXIF, applies EXIF orientation, and normalizes to JPEG. Result is written as `orig.jpeg` and is the **source for every subsequent derivative**, so resizes never re-read the original file.
-2. For each (dimension, format) pair: `smartDims` fits the original inside the max box preserving aspect ratio (never upscales — returns original dims if already smaller), then resize + convert, saved as `<name>.<ext>`.
-3. `Thumbnail(thumbSize)` → `thumbnail.jpeg` (bimg's `Thumbnail` takes a single size for both dimensions).
+1. The caller decodes once via `decodeImage`, which sniffs the format, enforces the 40 MP ceiling, and applies EXIF orientation.
+2. `flatten` composites alpha onto **white** once. Everything downstream descends from this single image.
+3. `orig.jpeg` is encoded at the original dimensions, quality 75.
+4. Breakpoints are walked **largest first** (`sortedDims`) and each resize feeds the next. `smartDims` is always computed against the *original* dimensions so "never upscale" is preserved exactly.
+5. `coverCrop` produces a centre-cropped square `thumbnail.jpeg` at **quality 95**.
 
-Output filenames come from the *keys* of the dims map, which are the CSS breakpoint names ("1200", "992", …) rather than the pixel widths — the site uses them in `<picture>`/`<source media="(min-width:1200px)">`. Keep that naming convention when changing defaults.
+`processImage` returns `[]Derivative` (name, format, bytes) rather than writing files. `Handler` uploads them from `bytes.Reader`; `--local` writes them to disk. **Nothing touches `/tmp`.**
 
-`saveImageLocal` deliberately ignores `bimg.Write`'s error; several call sites in `Handler` and `processImage` are similarly loose about errors. Follow the existing style only if asked — otherwise prefer propagating.
+Output filenames come from the *keys* of the dims map, which are CSS breakpoint names ("1200", "992", …) rather than pixel widths — the site uses them in `<picture>`/`<source media="(min-width:1200px)">`. Keep that naming convention when changing defaults.
+
+### Things that look wrong but are deliberate
+
+- **`thumbnail.jpeg` is quality 95** while everything else is 75. The old `bimg.Thumbnail` hardcoded `Quality: 95`; changing it would alter every thumbnail on the site. Pinned by `TestThumbnailIsHigherQuality`.
+- **`coverCrop`'s no-enlarge guard is an AND** (`inW < size && inH < size`), so a 100x2000 image is upscaled before cropping. This mirrors bimg's arithmetic exactly.
+- **`decode.go` registers the `mif1` HEIC brand itself.** `gen2brain/heic` registers `heic/heix/hevc/hevx/msf1` but not `mif1`, which libheif and several camera pipelines emit as the major brand — without it `image.Decode` cannot sniff those files even though the decoder handles them fine.
+- **`golang.org/x/image/webp` must NOT be imported.** `gen2brain/webp` already registers the `webp` format and provides the encoder; importing both double-registers the name.
+- **`resizeTo` must return `*image.RGBA` and use `draw.Src`.** `x/image/draw` only has generated fast paths for those; anything else drops to the per-pixel interface path and is ~10x slower.
+- **The first HEIC decode in a container costs ~575 ms extra** while wazero compiles the embedded WASM module (measured: 808 ms first call, ~230 ms after). Only HEIC pays this; `gen2brain/webp` is transpiled Go, not a WASM runtime, so it has no equivalent warm-up.
 
 ## Lambda contract
 
-`Handler` reads the bucket/key from `event.Records[0]` only (single record per invocation is assumed).
+`Handler` iterates **all** `event.Records`. Object keys are URL-decoded (`url.QueryUnescape`) — S3 delivers them percent/plus-encoded, and the old code 404'd on any key containing a space.
 
-Key layout is preserved between buckets: source `<src>/media/images/tags/bread/orig.jpg` produces `<DESTINATION_BUCKET>/media/images/tags/bread/{1200,992,…}.{jpeg,webp}` plus `orig.jpeg` and `thumbnail.jpeg`. `splitKey` does the prefix/filename split; the filename itself is discarded — the *directory* is the identity of the image set. `cleanup`'s `getDestinationPrefix` mirrors this exact logic for deletion.
+Key layout is preserved between buckets: source `<src>/media/images/tags/bread/orig.jpg` produces `<DESTINATION_BUCKET>/media/images/tags/bread/{1200,992,…}.{jpeg,webp}` plus `orig.jpeg` and `thumbnail.jpeg` — 14 files. `splitKey` does the prefix/filename split; the filename itself is discarded — the *directory* is the identity of the image set. `cleanup`'s `getDestinationPrefix` mirrors this logic.
 
-Work happens in `/tmp/output` (the only writable path in Lambda), then every file in that directory is uploaded. The directory is not cleared between invocations, so stale files from a warm container's previous run would be re-uploaded under the new prefix.
+Uploads set `ContentType` and a one-year immutable `CacheControl`.
 
 Source and destination buckets **must differ**, or the `ObjectCreated` trigger recurses.
 
@@ -96,12 +99,30 @@ Source and destination buckets **must differ**, or the `ObjectCreated` trigger r
 
 | Var | Lambda | CLI flag | Default |
 |---|---|---|---|
-| `DESTINATION_BUCKET` | required | n/a (uses `--output`) | — |
+| `DESTINATION_BUCKET` | required (validated) | n/a (uses `--output`) | — |
 | `DIMENSIONS` | optional | `--dims` | the six breakpoints in `getDefaultDims()` |
 | `FORMATS` | optional | `--formats` | `jpeg,webp` |
 | `THUMB_SIZE` | optional | `--thumbSize` | 128 |
 | `MAX_KEYS` | required by `cleanup` | n/a | — |
 
-`DIMENSIONS` format: `name1:width1,height1;name2:width2,height2`. Empty/unset falls back to defaults — `parseDims` and `parseImageTypes` treat `""` as "not configured" precisely because `os.Getenv` cannot distinguish unset from empty.
+`DIMENSIONS` format: `name1:width1,height1;name2:width2,height2`. Empty/unset falls back to defaults — `parseDims` and `parseImageTypes` treat `""` as "not configured" precisely because `os.Getenv` cannot distinguish unset from empty. A *malformed* value is now a hard error; it used to be logged and ignored, which silently produced 2 files instead of 14.
 
 `cleanup` caps deletion at `MAX_KEYS` from a single `ListObjectsV2` page and does not paginate; an image folder with more objects than that is only partly cleaned.
+
+## Coupling to the Django app
+
+This repo is a git submodule of the parent Django project at `/usr/local/src/nnr`. Two things there constrain this code:
+
+- **`recipes/models.py:178-179`** — `SCREEN_SIZES` and `PHOTO_EXTENSIONS` must match `getDefaultDims()` and `getDefaultImageTypes()`. They define the `<picture>` markup. `TestProcessImageManifest` pins the resulting 14-file set.
+- **`recipes/signals.py:11`** — hardcodes `PHOTOS = "/usr/local/src/nnr/awslambda/photos/build/photos"` and shells out to `--local` on `post_save` when `DEBUG`, with no flags. So **the defaults are the production contract.**
+
+HEIC uploads also require `pillow-heif` and `register_heif_opener()` on the Django side — without it `ImageField` rejects HEIC before it ever reaches S3.
+
+## Tests
+
+`go test -tags nodynamic ./...`. Fixtures live in `testdata/`:
+
+- `testdata/orientation/{landscape,portrait}_{1..8}.jpg` — the standard EXIF orientation set. `TestOrientation` asserts each variant lands within a mean-absolute-error tolerance of the upright reference, which catches transpose/mirror mixups that dimension checks miss.
+- `testdata/*.heic` — real HEIC files including `test.heic`, which is grid/tiled (how phones store photos) and `mif1`-branded files.
+
+Everything else is generated synthetically in-test. Tests assert *behaviour* — manifest, dimensions, sniffed format, geometry — not encoder bytes, because encoder output drifts between versions.

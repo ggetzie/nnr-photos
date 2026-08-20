@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -26,12 +27,20 @@ func getDestinationPrefix(s3ObjectKey string) (string, error) {
 	//      media/images/tags/bread/1200.jpeg
 	//      media/images/tags/bread/920.webp etc.
 	// we want to delete all media/images/tags/bread/* in the destination bucket
-	lastSlash := strings.LastIndex(s3ObjectKey, "/")
-	if lastSlash == len(s3ObjectKey)-1 {
-		return "Error - getDestinationPrefix", errors.New("no filename found in S3 Object Key")
+	if s3ObjectKey == "" {
+		return "", errors.New("empty S3 object key")
 	}
-	prefix := s3ObjectKey[0:lastSlash]
-	return prefix, nil
+	if strings.HasSuffix(s3ObjectKey, "/") {
+		return "", errors.New("no filename found in S3 Object Key")
+	}
+	lastSlash := strings.LastIndex(s3ObjectKey, "/")
+	if lastSlash < 0 {
+		// Previously this sliced [0:-1] and panicked. Returning an empty
+		// prefix would be far worse here than a panic: this is a delete path,
+		// and an empty prefix matches every object in the bucket.
+		return "", fmt.Errorf("refusing to derive a prefix from key %q: no directory component", s3ObjectKey)
+	}
+	return s3ObjectKey[:lastSlash], nil
 }
 
 func Handler(ctx context.Context, event events.S3Event) (string, error) {
@@ -52,7 +61,14 @@ func Handler(ctx context.Context, event events.S3Event) (string, error) {
 	}
 
 	client := s3.NewFromConfig(cfg)
-	sourceObject := event.Records[0].S3.Object.Key
+	if len(event.Records) == 0 {
+		return "Error", errors.New("event contained no records")
+	}
+	// S3 URL-encodes object keys in event notifications.
+	sourceObject, err := url.QueryUnescape(event.Records[0].S3.Object.Key)
+	if err != nil {
+		return "Error", fmt.Errorf("decoding object key %q: %w", event.Records[0].S3.Object.Key, err)
+	}
 	prefix, err := getDestinationPrefix(sourceObject)
 	if err != nil {
 		return "Error", err
@@ -72,6 +88,11 @@ func Handler(ctx context.Context, event events.S3Event) (string, error) {
 
 	for _, object := range listOutput.Contents {
 		toDelete = append(toDelete, types.ObjectIdentifier{Key: aws.String(*object.Key)})
+	}
+
+	if len(toDelete) == 0 {
+		fmt.Printf("Nothing to delete under %s/%s\n", destinationBucket, prefix)
+		return "Success", nil
 	}
 
 	deleteParams := s3.DeleteObjectsInput{

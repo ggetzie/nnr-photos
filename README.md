@@ -2,16 +2,46 @@
 
 This program was created to automatically optimize photos uploaded to [No Nonsense Recipes](https://nononsense.recipes). It is intended to be run as an AWS Lambda function triggered on an S3 `ObjectCreated` event. It can also be run as a command line program (see [Command Line Usage](#command-line-usage) below).
 
-It's written in [Go](https://go.dev/) and uses the [bimg](https://pkg.go.dev/github.com/h2non/bimg) package.
+It's written in [Go](https://go.dev/) with **no cgo and no native dependencies**. Everything is the standard library plus [`golang.org/x/image`](https://pkg.go.dev/golang.org/x/image), [`gen2brain/webp`](https://github.com/gen2brain/webp) for WebP encoding and [`gen2brain/heic`](https://github.com/gen2brain/heic) for HEIC decoding, both of which are CGo-free.
 
-bimg depends on [libvips](https://www.libvips.org/), so a Docker image modifying the [AWS Lambda base image](https://github.com/aws/aws-lambda-base-images/blob/go1.x/Dockerfile.go1.x) to install libvips is included with all necessary libraries to support JPEG, WEBP, PNG, GIF, HEIF, and TIFF formats.
+That means it builds with `CGO_ENABLED=0` and ships as a **5.5 MB zip** (14 MB unzipped) on the `provided.al2023` runtime. There is no container image, no ECR repository, and nothing to install on a development machine beyond Go itself.
+
+> This program previously used [bimg](https://pkg.go.dev/github.com/h2non/bimg)/[libvips](https://www.libvips.org/), which required a Docker image that compiled libvips, libwebp, libheif, libde265 and x265 from source and weighed over 1 GB. See [Input formats](#input-formats) for what changed behaviourally.
+
+### Input formats
+
+| Format | Decoded | Notes |
+|---|---|---|
+| JPEG | yes | including EXIF orientation |
+| PNG | yes | transparency is composited onto **white** (see below) |
+| HEIC | yes | including grid/tiled images, which is how phones store them |
+| GIF | yes | first frame |
+| TIFF | yes | |
+| WebP | yes | |
+
+Output is always JPEG and/or WebP (PNG is available via `--formats` but unused by the site).
+
+### Behavioural notes
+
+A few details worth knowing, mostly carried over deliberately from the libvips implementation:
+
+- **`thumbnail.jpeg` is a centre-cropped square at quality 95.** Every other derivative is quality 75. This matches the old `bimg.Thumbnail`, which hardcoded `Crop: true, Quality: 95`.
+- **Transparent PNGs are composited onto white.** libvips dropped the alpha band without flattening; Go's JPEG encoder reads alpha-premultiplied values, which would turn transparent regions black. White is the sensible result for a recipe page, so it is done explicitly.
+- **Derivatives are chained largest to smallest on raw pixels.** The old code re-decoded `orig.jpeg` for every derivative, stacking a fresh generation of JPEG loss onto each. WebP files are therefore slightly *larger* than before at the same nominal quality, because more real detail survives to the encoder.
+- **Nothing is written to `/tmp`.** Derivatives are held in memory and uploaded from there, so a warm container can no longer re-upload a previous invocation's files under a new key prefix.
+- **Uploads set `Content-Type` and a long `Cache-Control`.** Previously S3 served every derivative as `binary/octet-stream`.
+- Inputs above 40 megapixels are rejected. libvips used to shrink on load; pure Go must decode at full resolution, so the ceiling is explicit.
+
+HEIC inputs pay a further ~575 ms on the *first* decode in a container while the embedded WASM decoder is compiled (~230 ms per decode after that).
+
+Processing a 12 MP photo takes roughly 2 seconds and peaks around 260 MB of RSS - slower per invocation than libvips, but the cold start is far better (a static binary in a zip versus pulling a 1 GB image and dynamically linking against `/usr/local/lib`).
 
 `nnr-photos` performs a number of common operations to optimize images for the web:
 
 - strips EXIF data (removes any identifying information that may be present such as camera type, geolocation, etc.)
 - Auto-Rotate - aligns image orientation to match EXIF orientation
 - Convert to jpeg - converts all input files to JPEG with the original dimensions
-- Create thumbnails
+- Create thumbnails - a centre-cropped square at JPEG quality 95
 - Resize to common screen-friendly dimensions and convert to common formats. By default, `nnr-photos` will output jpeg and webp formats in the following dimensions:    
 
 ### Default Output Dimensions
@@ -87,37 +117,57 @@ Output formats and dimensions can be customized by setting the `DIMENSIONS`, `FO
 
 ## Lambda Usage
 
-Replace `1234567890` below with the appropriate address for your AWS ECR repository.
+Build the deployment zip and push it:
 
-- Retrieve authentication token and authenticate docker to your ECR repository
-  `aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 1234567890.dkr.ecr.us-east-1.amazonaws.com`
-- Build Docker image  
-  `docker build -t nnr-photos`
-- After the build completes tag the latest image  
-  `docker tag nnr-photos:latest 1234567890.dkr.ecr.us-east-1.amazonaws.com/nnr-photos:latest`
-- Push to the AWS repository  
-  `docker push 1234567890.dkr.ecr.us-east-1.amazonaws.com/nnr-photos:latest`
+```bash
+make lambda                       # -> photos-lambda.zip (~5.5 MB)
+make deploy NAME=nnr-photos       # aws lambda update-function-code
+```
 
-  To use create a Lambda function and deploy with a container image: [AWS Docs](https://docs.aws.amazon.com/lambda/latest/dg/go-image.html)
+`make lambda` produces a stripped, statically linked `bootstrap` binary for `arm64`. Build for Intel with `make lambda ARCH=amd64`.
 
-  Set an environment variable `DESTINATION_BUCKET` to the name of the S3 bucket where you would like the processed images to be saved.
+The function must be configured as:
 
-  Create an S3 `ObjectCreated` event trigger for the function so it runs every time a new images is uploaded to the source bucket. Note AWS recommends using separate buckets to avoid an infinite loop of recursive lambda calls.
+| Setting | Value |
+|---|---|
+| Package type | Zip |
+| Runtime | `provided.al2023` |
+| Handler | `bootstrap` |
+| Architecture | `arm64` |
+| Memory | **1769 MB** (the point where Lambda allocates a full vCPU) |
+| Timeout | 60 s |
 
-  Optionally set environment variables for `DIMENSIONS`, `FORMATS`, and `THUMB_SIZE` to use custom values instead of the defaults.
-  
-  
+Set `DESTINATION_BUCKET` to the S3 bucket where processed images should be saved.
+
+Create an S3 `ObjectCreated` event trigger so the function runs whenever a new image is uploaded to the source bucket. The source and destination buckets **must differ**, or the trigger recurses.
+
+Optionally set `DIMENSIONS`, `FORMATS`, and `THUMB_SIZE` to override the defaults.
+
+Test an invocation with the sample event:
+
+```bash
+aws lambda invoke --function-name nnr-photos --payload fileb://s3_test.json /dev/stdout
+```
+
+### Migrating from the old container image
+
+A Lambda function's `PackageType` is **immutable** - an `Image` function cannot be updated into a `Zip` function. Migration means:
+
+1. Create a *new* function with the settings in the table above, reusing the existing IAM role and environment variables.
+2. Point the S3 `ObjectCreated` notification at it, and add the `lambda:InvokeFunction` resource policy for `s3.amazonaws.com`.
+3. Verify with `aws lambda invoke`.
+4. Remove the old notification, then delete the old function and its ECR repository.
 
 ## Command Line Usage
 
-This program can also be run locally from the command line with the `--local` option. Make sure you have all the necessary libraries installed for libvips and all the file formats you wish to use. Note that for some libraries libvips might require a newer version than is available in your distribution's package repository, so it may be necessary to compile them from source. See the [Dockerfile](./Dockerfile) for how to install all the libraries necessary to support PNG, GIF, TIFF, HEIF, JPEG, and WEBP files.
-
-When all libraries are installed, simply build and place the binary in your `$PATH`
+This program can also be run locally from the command line with the `--local` option. There are no system prerequisites - Go is the only requirement.
 
 ```bash
-go build -o /path/to/photos photos.go
-sudo ln -s /path/to/photos /usr/local/bin/photos
+make build                        # -> build/photos
+sudo ln -s "$PWD/build/photos" /usr/local/bin/photos
 ```
+
+The Django development server shells out to `build/photos` from `recipes/signals.py`, so keep that path intact.
 
 Specify the input file, output directory, desired output file types, desired dimensions, and thumbnail size.
 
