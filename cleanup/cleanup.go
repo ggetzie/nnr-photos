@@ -100,13 +100,33 @@ func Handler(ctx context.Context, event events.S3Event) (string, error) {
 		Delete: &types.Delete{Objects: toDelete},
 	}
 	res, err := client.DeleteObjects(ctx, &deleteParams)
-
 	if err != nil {
-		fmt.Printf("Error deleting %s from %s\n", prefix, destinationBucket)
-		return "Error", err
+		return "Error", fmt.Errorf("deleting %d objects under %s/%s: %w",
+			len(toDelete), destinationBucket, prefix, err)
 	}
 
-	fmt.Printf("Delete Output %v\n", res)
+	// DeleteObjects reports per-object failures in res.Errors rather than
+	// returning an error, so without this check a partial failure is
+	// indistinguishable from a clean run.
+	if len(res.Errors) > 0 {
+		for _, e := range res.Errors {
+			fmt.Printf("Failed to delete %s: %s %s\n",
+				aws.ToString(e.Key), aws.ToString(e.Code), aws.ToString(e.Message))
+		}
+		return "Error", fmt.Errorf("deleted %d of %d objects under %s/%s, %d failed",
+			len(res.Deleted), len(toDelete), destinationBucket, prefix, len(res.Errors))
+	}
+
+	fmt.Printf("Deleted %d objects under %s/%s\n", len(res.Deleted), destinationBucket, prefix)
+
+	// This function reads a single ListObjectsV2 page and does not paginate,
+	// so a truncated listing means the folder is only partly cleaned. Test
+	// IsTruncated rather than comparing counts: the standard derivative set is
+	// exactly MAX_KEYS objects, so a count comparison warns on every clean run.
+	if listOutput.IsTruncated {
+		fmt.Printf("WARNING: more than MAX_KEYS (%d) objects under %s/%s; some were not deleted\n",
+			maxKeys, destinationBucket, prefix)
+	}
 
 	return "Success", nil
 }

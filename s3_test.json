@@ -27,8 +27,8 @@
           "arn": "arn:aws:s3:::nnr-media-raw"
         },
         "object": {
-          "key": "media/images/raw/tags/bread/orig.jpg",
-          "size": 1024,
+          "key": "media/images/tags/bread/orig.jpeg",
+          "size": 1230687,
           "eTag": "0123456789abcdef0123456789abcdef",
           "sequencer": "0A1B2C3D4E5F678901"
         }

@@ -7,7 +7,7 @@ GOFLAGS  := -tags "lambda.norpc nodynamic" -trimpath -ldflags="-s -w"
 ARCH     ?= arm64
 ZIP      := photos-lambda.zip
 
-.PHONY: all build test vet lambda clean fmt
+.PHONY: all build test vet lambda lambda-cleanup deploy deploy-cleanup clean fmt
 
 all: build test
 
@@ -28,8 +28,31 @@ lambda: clean-zip
 
 ## deploy: push the zip to an existing function (NAME=nnr-photos)
 NAME ?= nnr-photos
+PROFILE ?= agent-toolkit
+REGION  ?= us-east-1
 deploy: lambda
-	aws lambda update-function-code --function-name $(NAME) --zip-file fileb://$(ZIP)
+	aws lambda update-function-code --function-name $(NAME) --zip-file fileb://$(ZIP) \
+		--profile $(PROFILE) --region $(REGION)
+
+## lambda-cleanup: build the cleanup Lambda's deployment zip
+CLEANUP_ZIP  := cleanup-lambda.zip
+CLEANUP_NAME ?= nnr-photos-cleanup
+lambda-cleanup:
+	@rm -f $(CLEANUP_ZIP)
+	cd cleanup && CGO_ENABLED=0 GOOS=linux GOARCH=$(ARCH) go build \
+		-tags lambda.norpc -trimpath -ldflags="-s -w" -o ../bootstrap .
+	@if command -v zip >/dev/null 2>&1; then \
+		zip -qj $(CLEANUP_ZIP) bootstrap; \
+	else \
+		python3 -c "import zipfile; z=zipfile.ZipFile('$(CLEANUP_ZIP)','w'); i=zipfile.ZipInfo('bootstrap'); i.compress_type=zipfile.ZIP_DEFLATED; i.external_attr=0o100755<<16; z.writestr(i, open('bootstrap','rb').read()); z.close()"; \
+	fi
+	@rm -f bootstrap
+	@ls -la $(CLEANUP_ZIP) | awk '{printf "%s  %.2f MB\n", $$9, $$5/1048576}'
+
+## deploy-cleanup: push the cleanup zip
+deploy-cleanup: lambda-cleanup
+	aws lambda update-function-code --function-name $(CLEANUP_NAME) --zip-file fileb://$(CLEANUP_ZIP) \
+		--profile $(PROFILE) --region $(REGION)
 
 test:
 	go test -tags nodynamic ./...
@@ -43,7 +66,7 @@ fmt:
 	gofmt -w *.go cleanup/*.go
 
 clean: clean-zip
-	rm -rf build bootstrap
+	rm -rf build bootstrap $(CLEANUP_ZIP)
 
 clean-zip:
 	@rm -f $(ZIP)
