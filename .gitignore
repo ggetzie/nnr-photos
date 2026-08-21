@@ -7,3 +7,6 @@ vendor/
 
 # Local A/B output
 out/
+
+# Per-project deployment config; copy photos-stack.env.example to create it
+deploy/photos-stack.env
